@@ -14,13 +14,13 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 # 1. CONFIGURATION
 # ==============================================================================
 
-# Output Root Folder (Where results will be saved in Drive)
-OUTPUT_ROOT_ID = "1v9KmadaepEc5gsMCf3JUyL4IcuKUTnSn"
+# Output Root Folder (Must be in a Shared Drive)
+OUTPUT_ROOT_ID = "0AEDJ3Yc9IXQcUk9PVA"
 
-# The Payroll Tracking Sheet ID (Used to find new uploads)
+# The Payroll Tracking Sheet ID
 TRACKING_SHEET_ID = "1O4aYE5mdXdAXtlvyQfcHoaQtqj3GoEyOOGE_UDK0DfI"
 
-# Auth Setup (Service Account for GitHub Actions)
+# Auth Setup
 SERVICE_ACCOUNT_JSON = json.loads(os.environ['SERVICE_ACCOUNT_KEY'])
 SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets']
 creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_JSON, scopes=SCOPES)
@@ -29,19 +29,14 @@ def get_service(service_name='drive', version='v3'):
     return build(service_name, version, credentials=creds)
 
 # ==============================================================================
-# 2. CORE LOGIC (Kept exactly from your Colab Script)
+# 2. CORE LOGIC
 # ==============================================================================
 
 def extract_start_date(filename):
-    """
-    Extracts the first date from filename like: 
-    '2572_ParikhBiweeklyA_11-3-2025to11-16-2025'
-    Returns a datetime object.
-    """
-    # Regex to find patterns like 11-3-2025 or 11/03/2025
+    """Extracts date from filename like '..._11-3-2025to...'"""
     match = re.search(r'(\d{1,2}[-\/]\d{1,2}[-\/]\d{4})', filename)
     if match:
-        date_str = match.group(1).replace('/', '-') # Normalize to dashes
+        date_str = match.group(1).replace('/', '-')
         try:
             return datetime.datetime.strptime(date_str, "%m-%d-%Y")
         except ValueError:
@@ -64,9 +59,7 @@ def get_week_number(day_str, pay_period_start):
             date_obj = datetime.datetime.strptime(day_str, "%m/%d/%Y")
         else:
             date_obj = day_str
-            
         days_diff = (date_obj - pay_period_start).days
-        
         if 0 <= days_diff <= 6:
             return date_obj, 1
         elif 7 <= days_diff <= 13:
@@ -77,19 +70,17 @@ def get_week_number(day_str, pay_period_start):
         return None, None
 
 def detect_format_from_content(content):
-    """Reads the first few lines of the string content to detect format."""
-    first_lines = content[:1000] # Read first 1000 chars
+    first_lines = content[:1000]
     if 'Previous Payroll Report' in first_lines or 'Reclose Payroll Report' in first_lines:
         return 'payroll'
     elif 'Timeclock Report' in first_lines or 'All Employees:' in first_lines:
         return 'timeclock'
-    # Fallback
     if 'Clockset' in first_lines and 'ACTIVE' in first_lines:
         return 'timeclock'
     return 'payroll'
 
 # ==============================================================================
-# 3. PARSING FUNCTIONS (Kept exactly from your Colab Script)
+# 3. PARSING FUNCTIONS
 # ==============================================================================
 
 def parse_payroll_content(content, header_year_default):
@@ -104,7 +95,6 @@ def parse_payroll_content(content, header_year_default):
         line = line.strip()
         if not line: continue
         
-        # Store Number
         if "Popeye's" in line or "Popeyes" in line:
             match = re.search(r"Popeye's\s*#?\s*(\d+)", line, re.IGNORECASE)
             if not match: match = re.search(r"Popeyes\s*#?\s*(\d+)", line, re.IGNORECASE)
@@ -121,7 +111,6 @@ def parse_payroll_content(content, header_year_default):
             parts = [p.strip() for p in line.split(',')]
 
         if parts is None:
-            # Overtime Line
             ot_match = re.match(r'^\s*"?(\d+)\s+([\d\.]+)\s*"?$', line)
             if ot_match:
                 try:
@@ -159,7 +148,7 @@ def parse_payroll_content(content, header_year_default):
             full_date = date_str
             try:
                 if '-' in date_str:
-                    if any(m in date_str for m in ['Jan','Feb','Mar']): # Short month check
+                    if any(m in date_str for m in ['Jan','Feb','Mar']):
                          date_obj = datetime.datetime.strptime(f"{date_str}-{header_year}", "%d-%b-%Y")
                     elif len(date_str.split('-')[0]) <= 2:
                         date_obj = datetime.datetime.strptime(f"{date_str}-{header_year}", "%m-%d-%Y")
@@ -179,7 +168,6 @@ def parse_payroll_content(content, header_year_default):
 
     df = pd.DataFrame(data)
     
-    # Map names to Overtime entries
     if not df.empty and 'type' in df.columns:
         name_map = df[df['type'] == 'Clockset'].groupby('emp_id').agg(
             first_name=('first_name', 'first'), last_name=('last_name', 'first')
@@ -213,25 +201,21 @@ def parse_timeclock_content(content):
         else:
             parts = [p.strip() for p in line.split(',')]
         
-        # Store Number
         if "Popeye's" in parts[0] or 'POPEYES' in parts[0]:
             match = re.search(r"Popeye's\s*#?\s*(\d+)", parts[0], re.IGNORECASE)
             if not match: match = re.search(r'#(\d+)', parts[0])
             if match: store_no = match.group(1)
             continue
         
-        # Skip Headers
         if any(k in parts[0] for k in ['Timeclock Summary', 'Total Paid', 'Active Employees', 'Timeclock Report']):
             continue
         
-        # Employee Header
         if parts[0].strip().isdigit() and len(parts) >= 3:
             current_emp_id = parts[0].strip()
             current_first_name = parts[1].strip()
             current_last_name = parts[2].strip()
             continue
         
-        # Data Line
         if len(parts) >= 6 and current_emp_id:
             day_idx = 2
             if parts[1] in ['*O', '*I', '**']: day_idx = 2
@@ -246,14 +230,11 @@ def parse_timeclock_content(content):
                 if entry_type in ['Clockset', 'Clockset  ', 'Paid Break']:
                     date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', date_str_raw)
                     clean_date = date_match.group(1) if date_match else ''
-                    
                     t1 = re.search(r'(\d{1,2}:\d{2})', date_str_raw)
                     t2 = re.search(r'(\d{1,2}:\d{2})', end_time_raw)
                     start_time = t1.group(1) if t1 else ''
                     end_time = t2.group(1) if t2 else ''
-                    
                     decimal_hours = parse_duration_to_decimal(duration)
-                    
                     data.append({
                         'emp_id': current_emp_id,
                         'first_name': current_first_name,
@@ -268,13 +249,12 @@ def parse_timeclock_content(content):
     return pd.DataFrame(data), store_no
 
 # ==============================================================================
-# 4. DATAFRAME GENERATORS (Kept exactly from your Colab Script)
+# 4. DATAFRAME GENERATORS
 # ==============================================================================
 
 def prepare_formatted_df(df, store_no):
     if df.empty: return pd.DataFrame()
     daily_df = df[df['type'].isin(['Clockset', 'Paid Break'])].copy()
-    
     output_df = pd.DataFrame({
         'store_no': store_no if store_no else daily_df.get('store_no', ''),
         'emp_id': daily_df['emp_id'],
@@ -351,7 +331,6 @@ def get_pending_payroll_uploads():
         pending = []
         if len(rows) > 1:
             for row in rows[1:]:
-                # Check column D (index 3) for status
                 if len(row) >= 4 and row[3] == "PAYROLL UPLOADED":
                     file_id = row[0]
                     file_name = row[1] if len(row) > 1 else "Unknown.csv"
@@ -393,9 +372,17 @@ def get_file_content(file_id):
         return None
 
 def get_or_create_folder(parent_id, folder_name):
+    # UPDATED FOR SHARED DRIVE SUPPORT
     service = get_service('drive', 'v3')
     query = f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
-    results = service.files().list(q=query, fields="files(id)").execute()
+    
+    # ADDED supportsAllDrives=True
+    results = service.files().list(
+        q=query, 
+        fields="files(id)", 
+        includeItemsFromAllDrives=True, 
+        supportsAllDrives=True
+    ).execute()
     files = results.get('files', [])
     
     if files:
@@ -406,20 +393,32 @@ def get_or_create_folder(parent_id, folder_name):
             'mimeType': 'application/vnd.google-apps.folder',
             'parents': [parent_id]
         }
-        folder = service.files().create(body=metadata, fields='id').execute()
+        # ADDED supportsAllDrives=True
+        folder = service.files().create(
+            body=metadata, 
+            fields='id', 
+            supportsAllDrives=True
+        ).execute()
         return folder['id']
 
 def upload_csv_to_drive(df, filename, folder_id):
     if df.empty: return
     service = get_service('drive', 'v3')
     
-    # Check duplicate
+    # Check duplicate (Updated for Shared Drive)
     query = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
-    results = service.files().list(q=query, fields="files(id)").execute()
+    results = service.files().list(
+        q=query, 
+        fields="files(id)", 
+        includeItemsFromAllDrives=True, 
+        supportsAllDrives=True
+    ).execute()
+    
     if results.get('files'):
         print(f"   - File exists (Updating): {filename}")
         file_id = results.get('files')[0]['id']
-        service.files().delete(fileId=file_id).execute()
+        # ADDED supportsAllDrives=True
+        service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
 
     csv_buffer = io.StringIO()
     df.to_csv(csv_buffer, index=False)
@@ -427,11 +426,17 @@ def upload_csv_to_drive(df, filename, folder_id):
     media = MediaIoBaseUpload(io.BytesIO(csv_buffer.getvalue().encode('utf-8')), mimetype='text/csv')
     metadata = {'name': filename, 'parents': [folder_id]}
     
-    service.files().create(body=metadata, media_body=media, fields='id').execute()
+    # ADDED supportsAllDrives=True (CRITICAL FIX)
+    service.files().create(
+        body=metadata, 
+        media_body=media, 
+        fields='id', 
+        supportsAllDrives=True
+    ).execute()
     print(f"   - Uploaded: {filename}")
 
 # ==============================================================================
-# 6. MAIN EXECUTION (GitHub Actions Flow)
+# 6. MAIN EXECUTION
 # ==============================================================================
 
 def main():
