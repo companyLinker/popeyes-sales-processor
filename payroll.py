@@ -319,7 +319,10 @@ def prepare_pivot_df(df, store_no, pay_period_start):
 # ==============================================================================
 
 def get_pending_payroll_uploads():
-    """Get list of (file_id, file_name) marked as PAYROLL UPLOADED in Tracking Sheet"""
+    """
+    Returns a list of tuples: (file_id, file_name, row_index)
+    Only selects rows where Status (Col D) is 'PAYROLL UPLOADED'.
+    """
     try:
         service = get_service('sheets', 'v4')
         result = service.spreadsheets().values().get(
@@ -330,33 +333,50 @@ def get_pending_payroll_uploads():
         
         pending = []
         if len(rows) > 1:
-            for row in rows[1:]:
+            for i, row in enumerate(rows):
+                # i starts at 0, which corresponds to Row 1 in Sheets.
+                # Since we read the whole sheet, row index = i + 1.
+                current_row_num = i + 1
+                
+                # Skip Header (Row 1)
+                if current_row_num == 1: continue
+
+                # Check column D (index 3) for status
                 if len(row) >= 4 and row[3] == "PAYROLL UPLOADED":
                     file_id = row[0]
                     file_name = row[1] if len(row) > 1 else "Unknown.csv"
-                    pending.append((file_id, file_name))
+                    # Store the row number so we can update it later
+                    pending.append((file_id, file_name, current_row_num))
         return pending
     except Exception as e:
         print(f"Error reading tracking sheet: {e}")
         return []
 
-def mark_payroll_done(file_id, file_name, result_message="PAYROLL DONE"):
-    """Mark file as PAYROLL DONE in tracking sheet"""
+def mark_payroll_done(row_num, result_message="PAYROLL DONE"):
+    """
+    Updates column D (Status) of the SPECIFIC row number.
+    Does NOT append a new row.
+    """
     try:
         service = get_service('sheets', 'v4')
-        timestamp = datetime.datetime.now().isoformat()
-        body = {'values': [[file_id, file_name, timestamp, result_message]]}
-        service.spreadsheets().values().append(
+        
+        # Target only Column D of the specific row (e.g., "Sheet1!D5")
+        range_name = f"Sheet1!D{row_num}"
+        
+        body = {'values': [[result_message]]}
+        
+        service.spreadsheets().values().update(
             spreadsheetId=TRACKING_SHEET_ID,
-            range="Sheet1!A:D",
+            range=range_name,
             valueInputOption="RAW",
             body=body
         ).execute()
+        print(f"   -> Tracking Sheet Row {row_num} updated to: {result_message}")
+        
     except Exception as e:
-        print(f"Error marking done: {e}")
+        print(f"Error updating tracking sheet row {row_num}: {e}")
 
 def get_file_content(file_id):
-    """Download file content from Drive as String"""
     try:
         service = get_service('drive', 'v3')
         request = service.files().get_media(fileId=file_id)
@@ -372,11 +392,9 @@ def get_file_content(file_id):
         return None
 
 def get_or_create_folder(parent_id, folder_name):
-    # UPDATED FOR SHARED DRIVE SUPPORT
     service = get_service('drive', 'v3')
     query = f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
     
-    # ADDED supportsAllDrives=True
     results = service.files().list(
         q=query, 
         fields="files(id)", 
@@ -393,7 +411,6 @@ def get_or_create_folder(parent_id, folder_name):
             'mimeType': 'application/vnd.google-apps.folder',
             'parents': [parent_id]
         }
-        # ADDED supportsAllDrives=True
         folder = service.files().create(
             body=metadata, 
             fields='id', 
@@ -405,7 +422,7 @@ def upload_csv_to_drive(df, filename, folder_id):
     if df.empty: return
     service = get_service('drive', 'v3')
     
-    # Check duplicate (Updated for Shared Drive)
+    # Check duplicate
     query = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
     results = service.files().list(
         q=query, 
@@ -417,7 +434,6 @@ def upload_csv_to_drive(df, filename, folder_id):
     if results.get('files'):
         print(f"   - File exists (Updating): {filename}")
         file_id = results.get('files')[0]['id']
-        # ADDED supportsAllDrives=True
         service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
 
     csv_buffer = io.StringIO()
@@ -426,7 +442,6 @@ def upload_csv_to_drive(df, filename, folder_id):
     media = MediaIoBaseUpload(io.BytesIO(csv_buffer.getvalue().encode('utf-8')), mimetype='text/csv')
     metadata = {'name': filename, 'parents': [folder_id]}
     
-    # ADDED supportsAllDrives=True (CRITICAL FIX)
     service.files().create(
         body=metadata, 
         media_body=media, 
@@ -448,19 +463,20 @@ def main():
 
     print(f"Found {len(pending_files)} pending payroll files.")
 
-    for file_id, file_name in pending_files:
-        print(f"\nProcessing: {file_name}")
+    # Loop through the tuple (file_id, file_name, row_num)
+    for file_id, file_name, row_num in pending_files:
+        print(f"\nProcessing Row {row_num}: {file_name}")
         
         # 1. Download Content from Drive
         content = get_file_content(file_id)
         if not content:
-            mark_payroll_done(file_id, file_name, "PAYROLL ERROR: Download Failed")
+            mark_payroll_done(row_num, "PAYROLL ERROR: Download Failed")
             continue
 
         # 2. Extract Date from Filename (Auto-detection)
         pay_period_start = extract_start_date(file_name)
         if not pay_period_start:
-            mark_payroll_done(file_id, file_name, "PAYROLL ERROR: No Date in Filename")
+            mark_payroll_done(row_num, "PAYROLL ERROR: No Date in Filename")
             continue
 
         # 3. Detect Format
@@ -480,7 +496,7 @@ def main():
             store_no = match.group(1) if match else "Unknown_Store"
 
         if df.empty:
-            mark_payroll_done(file_id, file_name, "PAYROLL ERROR: Empty Data")
+            mark_payroll_done(row_num, "PAYROLL ERROR: Empty Data")
             continue
 
         # 5. Generate Output DataFrames
@@ -488,15 +504,14 @@ def main():
         pivot_df = prepare_pivot_df(df, store_no, pay_period_start)
 
         # 6. Upload Results to Drive
-        # Ensure Store Folder exists inside Output Root
         store_folder_id = get_or_create_folder(OUTPUT_ROOT_ID, str(store_no))
         
         base_name = file_name.replace('.csv', '')
         upload_csv_to_drive(formatted_df, f"{base_name}_Formatted.csv", store_folder_id)
         upload_csv_to_drive(pivot_df, f"{base_name}_Pivot.csv", store_folder_id)
 
-        # 7. Update Tracking Sheet
-        mark_payroll_done(file_id, file_name, "PAYROLL DONE")
+        # 7. Update Tracking Sheet (IN PLACE)
+        mark_payroll_done(row_num, "PAYROLL DONE")
         print(f"Completed: {file_name}")
 
 if __name__ == "__main__":
