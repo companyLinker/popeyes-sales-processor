@@ -1,4 +1,4 @@
-name: Process Popeyes Sales Data
+name: Process Popeyes Data (Sales & Payroll)
 
 on:
   schedule:
@@ -20,12 +20,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run PART1 - Convert Raw CSVs
+      - name: Run PART1 - Convert Sales CSVs
         env:
           SERVICE_ACCOUNT_KEY: ${{ secrets.SERVICE_ACCOUNT_KEY }}
         run: python part1.py
 
-      - name: Run PART2 - Consolidate to Excel
+      - name: Run PART2 - Consolidate Sales to Excel
         env:
           SERVICE_ACCOUNT_KEY: ${{ secrets.SERVICE_ACCOUNT_KEY }}
         run: python part2.py
+
+      - name: Run Payroll Processor
+        env:
+          SERVICE_ACCOUNT_KEY: ${{ secrets.SERVICE_ACCOUNT_KEY }}
+        run: python payroll.py
