@@ -70,6 +70,7 @@ def get_week_number(day_str, pay_period_start):
         return None, None
 
 def detect_format_from_content(content):
+    if not content: return None
     first_lines = content[:1000]
     if 'Previous Payroll Report' in first_lines or 'Reclose Payroll Report' in first_lines:
         return 'payroll'
@@ -334,47 +335,33 @@ def get_pending_payroll_uploads():
         pending = []
         if len(rows) > 1:
             for i, row in enumerate(rows):
-                # i starts at 0, which corresponds to Row 1 in Sheets.
-                # Since we read the whole sheet, row index = i + 1.
                 current_row_num = i + 1
-                
-                # Skip Header (Row 1)
                 if current_row_num == 1: continue
 
-                # Check column D (index 3) for status
                 if len(row) >= 4 and row[3] == "PAYROLL UPLOADED":
                     file_id = row[0]
                     file_name = row[1] if len(row) > 1 else "Unknown.csv"
-                    # Store the row number so we can update it later
                     pending.append((file_id, file_name, current_row_num))
         return pending
     except Exception as e:
         print(f"Error reading tracking sheet: {e}")
         return []
 
-def mark_payroll_done(row_num, result_message="PAYROLL DONE"):
-    """
-    Updates column D (Status) of the SPECIFIC row number.
-    Does NOT append a new row.
-    """
+def mark_payroll_status(row_num, status_message):
+    """Updates column D (Status) of the SPECIFIC row number."""
     try:
         service = get_service('sheets', 'v4')
-        
-        # Target only Column D of the specific row (e.g., "Sheet1!D5")
         range_name = f"Sheet1!D{row_num}"
-        
-        body = {'values': [[result_message]]}
-        
+        body = {'values': [[status_message]]}
         service.spreadsheets().values().update(
             spreadsheetId=TRACKING_SHEET_ID,
             range=range_name,
             valueInputOption="RAW",
             body=body
         ).execute()
-        print(f"   -> Tracking Sheet Row {row_num} updated to: {result_message}")
-        
+        print(f"   -> Row {row_num} updated to: {status_message}")
     except Exception as e:
-        print(f"Error updating tracking sheet row {row_num}: {e}")
+        print(f"Error updating status for row {row_num}: {e}")
 
 def get_file_content(file_id):
     try:
@@ -422,7 +409,6 @@ def upload_csv_to_drive(df, filename, folder_id):
     if df.empty: return
     service = get_service('drive', 'v3')
     
-    # Check duplicate
     query = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
     results = service.files().list(
         q=query, 
@@ -463,56 +449,66 @@ def main():
 
     print(f"Found {len(pending_files)} pending payroll files.")
 
-    # Loop through the tuple (file_id, file_name, row_num)
     for file_id, file_name, row_num in pending_files:
         print(f"\nProcessing Row {row_num}: {file_name}")
         
-        # 1. Download Content from Drive
-        content = get_file_content(file_id)
-        if not content:
-            mark_payroll_done(row_num, "PAYROLL ERROR: Download Failed")
+        # --- SAFE PROCESS BLOCK ---
+        try:
+            # 1. Download Content
+            content = get_file_content(file_id)
+            if not content:
+                mark_payroll_status(row_num, "PAYROLL FAULTY: Download Failed")
+                continue
+
+            # 2. Extract Date (Auto-detection)
+            pay_period_start = extract_start_date(file_name)
+            if not pay_period_start:
+                mark_payroll_status(row_num, "PAYROLL FAULTY: Bad Date")
+                continue
+
+            # 3. Detect Format & Parse
+            try:
+                fmt = detect_format_from_content(content)
+                df = pd.DataFrame()
+                store_no = None
+
+                if fmt == 'payroll':
+                    df, store_no = parse_payroll_content(content, pay_period_start.year)
+                elif fmt == 'timeclock':
+                    df, store_no = parse_timeclock_content(content)
+                
+                if not store_no:
+                    match = re.search(r'^(\d+)', file_name)
+                    store_no = match.group(1) if match else "Unknown_Store"
+
+                if df.empty:
+                    mark_payroll_status(row_num, "PAYROLL FAULTY: Empty Data")
+                    continue
+
+            except Exception as e:
+                print(f"Parse error for {file_name}: {e}")
+                mark_payroll_status(row_num, "PAYROLL FAULTY: Parse Error")
+                continue
+
+            # 4. Generate & Upload
+            formatted_df = prepare_formatted_df(df, store_no)
+            pivot_df = prepare_pivot_df(df, store_no, pay_period_start)
+
+            store_folder_id = get_or_create_folder(OUTPUT_ROOT_ID, str(store_no))
+            
+            base_name = file_name.replace('.csv', '')
+            upload_csv_to_drive(formatted_df, f"{base_name}_Formatted.csv", store_folder_id)
+            upload_csv_to_drive(pivot_df, f"{base_name}_Pivot.csv", store_folder_id)
+
+            # 5. Success
+            mark_payroll_status(row_num, "PAYROLL DONE")
+            print(f"Completed: {file_name}")
+
+        except Exception as e:
+            # Catch-all for any other crash to prevent stopping the whole script
+            print(f"Critical error on file {file_name}: {e}")
+            mark_payroll_status(row_num, "PAYROLL FAULTY: Critical Error")
             continue
-
-        # 2. Extract Date from Filename (Auto-detection)
-        pay_period_start = extract_start_date(file_name)
-        if not pay_period_start:
-            mark_payroll_done(row_num, "PAYROLL ERROR: No Date in Filename")
-            continue
-
-        # 3. Detect Format
-        fmt = detect_format_from_content(content)
-        df = pd.DataFrame()
-        store_no = None
-
-        # 4. Parse
-        if fmt == 'payroll':
-            df, store_no = parse_payroll_content(content, pay_period_start.year)
-        elif fmt == 'timeclock':
-            df, store_no = parse_timeclock_content(content)
-        
-        # Fallback Store ID
-        if not store_no:
-            match = re.search(r'^(\d+)', file_name)
-            store_no = match.group(1) if match else "Unknown_Store"
-
-        if df.empty:
-            mark_payroll_done(row_num, "PAYROLL ERROR: Empty Data")
-            continue
-
-        # 5. Generate Output DataFrames
-        formatted_df = prepare_formatted_df(df, store_no)
-        pivot_df = prepare_pivot_df(df, store_no, pay_period_start)
-
-        # 6. Upload Results to Drive
-        store_folder_id = get_or_create_folder(OUTPUT_ROOT_ID, str(store_no))
-        
-        base_name = file_name.replace('.csv', '')
-        upload_csv_to_drive(formatted_df, f"{base_name}_Formatted.csv", store_folder_id)
-        upload_csv_to_drive(pivot_df, f"{base_name}_Pivot.csv", store_folder_id)
-
-        # 7. Update Tracking Sheet (IN PLACE)
-        mark_payroll_done(row_num, "PAYROLL DONE")
-        print(f"Completed: {file_name}")
 
 if __name__ == "__main__":
     main()
