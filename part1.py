@@ -10,7 +10,7 @@ import threading
 import concurrent.futures
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 # ==============================================================================
 # CONFIGURATION
@@ -344,23 +344,8 @@ def main():
         ).execute().get('files', [])
 
         if not existing:
-            csv_bytes = io.BytesIO(csv_output.encode("utf-8"))
-
-media = MediaIoBaseUpload(
-    csv_bytes,
-    mimetype="text/csv",
-    resumable=False
-)
-
-service.files().create(
-    body={
-        "name": output_name,
-        "parents": [target_id]
-    },
-    media_body=media,
-    fields="id"
-).execute()
-
+            media = MediaFileUpload(io.BytesIO(csv_output.encode('utf-8')), mimetype='text/csv')
+            service.files().create(body={'name': output_name, 'parents': [target_id]}, media_body=media).execute()
             print(f"Uploaded: {output_name}")
 
         mark_as_done(file_id, file_name)
@@ -373,4 +358,3 @@ service.files().create(
 
 if __name__ == "__main__":
     main()
-
