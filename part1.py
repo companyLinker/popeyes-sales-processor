@@ -16,8 +16,9 @@ from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBa
 # CONFIGURATION
 # ==============================================================================
 SALES_ROOT_FOLDER_ID = "1ge-fbJkuph-B5sGR3GThhIKRr5YKO_rS"
-CONVERTED_FOLDER_ID = "1F_fA9P01SKnP0SO64fLe3gAvWwGVjPwd"
-TRACKING_SHEET_ID = "1r872UNCcsgkdEkV9Y9PnNcuTtPrezs0XE3n8HFZgqyM"   # For UPLOADED → PART1_DONE
+# UPDATED: New Shared Drive Folder ID
+CONVERTED_FOLDER_ID = "0AMqtpoGz7H5RUk9PVA"
+TRACKING_SHEET_ID = "1r872UNCcsgkdEkV9Y9PnNcuTtPrezs0XE3n8HFZgqyM"   # For UPLOADED -> PART1_DONE
 LOG_SHEET_ID = "1XhdFj-fpINNJVveiEk_Qp2FRD-4CV6a1GnUKF7RWlVk"         # Your duplicate/invalid log sheet
 MAX_WORKERS = 15  # Safe for GitHub Actions runner
 
@@ -41,7 +42,7 @@ def get_service(service_name='drive', version='v3'):
     return getattr(thread_local, key)
 
 # ==============================================================================
-# TRACKING SHEET (UPLOADED → PART1_DONE)
+# TRACKING SHEET (UPLOADED -> PART1_DONE)
 # ==============================================================================
 def get_uploaded_files():
     """Get list of (file_id, file_name) marked as UPLOADED"""
@@ -256,12 +257,28 @@ def get_month_folder_name(filename):
 def get_or_create_subfolder(parent_id, folder_name):
     service = get_service()
     query = f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
-    response = service.files().list(q=query, fields="files(id)").execute()
+    
+    # UPDATED: Added supportsAllDrives=True and includeItemsFromAllDrives=True for Shared Drives
+    response = service.files().list(
+        q=query, 
+        fields="files(id)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
+    
     files = response.get('files', [])
     if files:
         return files[0]['id']
+    
     metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
-    folder = service.files().create(body=metadata, fields='id').execute()
+    
+    # UPDATED: Added supportsAllDrives=True for Shared Drives
+    folder = service.files().create(
+        body=metadata, 
+        fields='id',
+        supportsAllDrives=True
+    ).execute()
+    
     return folder['id']
 
 # ==============================================================================
@@ -338,15 +355,23 @@ def main():
         output_name = "converted_" + file_name
 
         service = get_service()
+        # UPDATED: Added supportsAllDrives and includeItemsFromAllDrives
         existing = service.files().list(
             q=f"'{target_id}' in parents and name='{output_name}' and trashed=false",
-            fields="files(id)"
+            fields="files(id)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
         ).execute().get('files', [])
 
         if not existing:
-            # FIXED: Use MediaIoBaseUpload for in-memory content
+            # FIXED: Indentation is correct now
+            # FIXED: Added supportsAllDrives=True
             media = MediaIoBaseUpload(io.BytesIO(csv_output.encode('utf-8')), mimetype='text/csv', resumable=True)
-            service.files().create(body={'name': output_name, 'parents': [target_id]}, media_body=media).execute()
+            service.files().create(
+                body={'name': output_name, 'parents': [target_id]}, 
+                media_body=media,
+                supportsAllDrives=True
+            ).execute()
             print(f"Uploaded: {output_name}")
 
         mark_as_done(file_id, file_name)
@@ -355,9 +380,7 @@ def main():
         flush_logs_to_sheet()
 
     flush_logs_to_sheet()
-    print(f"\nPART1 Complete – Processed {processed_count} new file(s).")
+    print(f"\nPART1 Complete - Processed {processed_count} new file(s).")
 
 if __name__ == "__main__":
     main()
-
-
