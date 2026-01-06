@@ -343,11 +343,11 @@ def main():
             fields="files(id)"
         ).execute().get('files', [])
 
-       if not existing:
-    # CORRECT: MediaIoBaseUpload handles in-memory BytesIO objects
-    media = MediaIoBaseUpload(io.BytesIO(csv_output.encode('utf-8')), mimetype='text/csv', resumable=True)
-    service.files().create(body={'name': output_name, 'parents': [target_id]}, media_body=media).execute()
-    print(f"Uploaded: {output_name}")
+        if not existing:
+            # FIXED: Use MediaIoBaseUpload for in-memory content
+            media = MediaIoBaseUpload(io.BytesIO(csv_output.encode('utf-8')), mimetype='text/csv', resumable=True)
+            service.files().create(body={'name': output_name, 'parents': [target_id]}, media_body=media).execute()
+            print(f"Uploaded: {output_name}")
 
         mark_as_done(file_id, file_name)
         processed_count += 1
@@ -359,4 +359,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
