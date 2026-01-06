@@ -7,20 +7,18 @@ import datetime
 import json
 import pandas as pd
 import threading
-import concurrent.futures
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
 SALES_ROOT_FOLDER_ID = "1ge-fbJkuph-B5sGR3GThhIKRr5YKO_rS"
-# UPDATED: New Shared Drive Folder ID
-CONVERTED_FOLDER_ID = "0AMqtpoGz7H5RUk9PVA"
-TRACKING_SHEET_ID = "1r872UNCcsgkdEkV9Y9PnNcuTtPrezs0XE3n8HFZgqyM"   # For UPLOADED -> PART1_DONE
-LOG_SHEET_ID = "1XhdFj-fpINNJVveiEk_Qp2FRD-4CV6a1GnUKF7RWlVk"         # Your duplicate/invalid log sheet
-MAX_WORKERS = 15  # Safe for GitHub Actions runner
+CONVERTED_FOLDER_ID = "0AMqtpoGz7H5RUk9PVA"  # Shared Drive Root Folder
+TRACKING_SHEET_ID = "1r872UNCcsgkdEkV9Y9PnNcuTtPrezs0XE3n8HFZgqyM"
+LOG_SHEET_ID = "1XhdFj-fpINNJVveiEk_Qp2FRD-4CV6a1GnUKF7RWlVk"
+MAX_WORKERS = 15
 
 SERVICE_ACCOUNT_JSON = json.loads(os.environ['SERVICE_ACCOUNT_KEY'])
 SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets']
@@ -30,7 +28,7 @@ creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_JSON, scopes=SCOPE
 # Thread-local storage
 thread_local = threading.local()
 log_lock = threading.Lock()
-log_entries = []  # For duplicate/invalid log sheet
+log_entries = []
 
 # ==============================================================================
 # SERVICES
@@ -42,10 +40,10 @@ def get_service(service_name='drive', version='v3'):
     return getattr(thread_local, key)
 
 # ==============================================================================
-# TRACKING SHEET (UPLOADED -> PART1_DONE)
+# TRACKING SHEET (UPDATED: Row-based Update)
 # ==============================================================================
 def get_uploaded_files():
-    """Get list of (file_id, file_name) marked as UPLOADED"""
+    """Get list of (file_id, file_name, row_index) marked as UPLOADED"""
     try:
         service = get_service('sheets', 'v4')
         result = service.spreadsheets().values().get(
@@ -53,36 +51,42 @@ def get_uploaded_files():
             range="Sheet1!A:D"
         ).execute()
         rows = result.get('values', [])
-        if len(rows) <= 1:
-            return []
+        
         uploaded = []
-        for row in rows[1:]:
-            if len(row) >= 4 and row[3] == "UPLOADED":
-                file_id = row[0]
-                file_name = row[1] if len(row) > 1 else "Unknown"
-                uploaded.append((file_id, file_name))
+        if len(rows) > 1:
+            # Start enumeration from 0, but row numbers in Sheets start at 1.
+            # Since header is row 1, the first data row is row 2.
+            for i, row in enumerate(rows):
+                row_num = i + 1  # 1-based index matching Sheet rows
+                if row_num == 1: continue # Skip header
+
+                if len(row) >= 4 and row[3] == "UPLOADED":
+                    file_id = row[0]
+                    file_name = row[1] if len(row) > 1 else "Unknown"
+                    uploaded.append((file_id, file_name, row_num))
         return uploaded
     except Exception as e:
         print(f"Error reading tracking sheet: {e}")
         return []
 
-def mark_as_done(file_id, file_name):
-    """Mark file as PART1_DONE in tracking sheet"""
+def mark_as_done(row_num, status="PART1_DONE"):
+    """Update SPECIFIC ROW in Column D to PART1_DONE"""
     try:
         service = get_service('sheets', 'v4')
-        timestamp = datetime.datetime.now().isoformat()
-        body = {'values': [[file_id, file_name, timestamp, "PART1_DONE"]]}
-        service.spreadsheets().values().append(
+        range_name = f"Sheet1!D{row_num}"
+        body = {'values': [[status]]}
+        service.spreadsheets().values().update(
             spreadsheetId=TRACKING_SHEET_ID,
-            range="Sheet1!A:D",
+            range=range_name,
             valueInputOption="RAW",
             body=body
         ).execute()
+        print(f"   -> Sheet Row {row_num} updated to: {status}")
     except Exception as e:
-        print(f"Error marking done: {e}")
+        print(f"Error marking done for row {row_num}: {e}")
 
 # ==============================================================================
-# LOGGING TO DUPLICATE/INVALID SHEET
+# LOGGING
 # ==============================================================================
 def add_log(store, month, filename, deleted_ts_status, full_sheet_status):
     with log_lock:
@@ -113,7 +117,7 @@ def flush_logs_to_sheet():
             print(f"Log flush error: {e}")
 
 # ==============================================================================
-# CORE CLEANUP & CONVERSION LOGIC (Your Advanced Code)
+# CORE PROCESSING
 # ==============================================================================
 def get_file_content(file_id):
     try:
@@ -166,12 +170,6 @@ def process_block(block_dict):
         return {'id': unique_id, 'lines': block_dict['lines'], 'is_log_on': is_log_on, 'timestamp': timestamp}
     except:
         return {'id': None, 'lines': block_dict['lines'], 'is_log_on': False, 'timestamp': "Unknown"}
-
-def get_header_signature(blocks):
-    for b in blocks:
-        if not b['is_log_on'] and b['id']:
-            return b['id']
-    return None
 
 def normalize_csv_from_string(content_str):
     input_io = io.StringIO(content_str)
@@ -247,6 +245,9 @@ def convert_to_final_format(content_str, file_name):
         print(f"Conversion error {file_name}: {e}")
         return None
 
+# ==============================================================================
+# FOLDER & NAME HELPERS
+# ==============================================================================
 def get_month_folder_name(filename):
     match = re.search(r'(\d{4})-(\d{2})-\d{2}', filename)
     if match:
@@ -254,11 +255,18 @@ def get_month_folder_name(filename):
         return datetime.date(year, month, 1).strftime('%B %Y')
     return None
 
+def get_store_number(filename):
+    """Extract store number from filename (e.g., 10618_2025...)"""
+    match = re.search(r'^(\d+)', filename)
+    if match:
+        return match.group(1)
+    return "Unknown_Store"
+
 def get_or_create_subfolder(parent_id, folder_name):
     service = get_service()
     query = f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
     
-    # UPDATED: Added supportsAllDrives=True and includeItemsFromAllDrives=True for Shared Drives
+    # Enable Shared Drive support
     response = service.files().list(
         q=query, 
         fields="files(id)",
@@ -272,7 +280,6 @@ def get_or_create_subfolder(parent_id, folder_name):
     
     metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
     
-    # UPDATED: Added supportsAllDrives=True for Shared Drives
     folder = service.files().create(
         body=metadata, 
         fields='id',
@@ -282,7 +289,7 @@ def get_or_create_subfolder(parent_id, folder_name):
     return folder['id']
 
 # ==============================================================================
-# MAIN: Process Only New Uploaded Files
+# MAIN
 # ==============================================================================
 def main():
     uploaded_files = get_uploaded_files()
@@ -293,23 +300,23 @@ def main():
     print(f"Found {len(uploaded_files)} new file(s) to clean and convert.")
 
     processed_count = 0
-    for file_id, file_name in uploaded_files:
-        print(f"\nProcessing: {file_name} (ID: {file_id})")
+    for file_id, file_name, row_num in uploaded_files:
+        print(f"\nProcessing Row {row_num}: {file_name} (ID: {file_id})")
 
         content = get_file_content(file_id)
         if not content:
             add_log("Unknown", "Unknown", file_name, "Download Failed", "Yes")
-            mark_as_done(file_id, file_name)
+            mark_as_done(row_num, "FAILED: Download")
             continue
 
         headers, blocks = parse_pos_csv(content)
         if headers is None:
             month = get_month_folder_name(file_name)
             add_log("Unknown", month, file_name, "N/A", "Yes (Invalid Structure)")
-            mark_as_done(file_id, file_name)
+            mark_as_done(row_num, "FAILED: Structure")
             continue
 
-        # Deduplication & cleaning logic
+        # Deduplication logic
         seen_orders = {}
         new_blocks = []
         deleted_details = []
@@ -332,7 +339,7 @@ def main():
         if not real_orders:
             month = get_month_folder_name(file_name)
             add_log("Unknown", month, file_name, f"Yes ({len(deleted_details)} deleted)", "Yes (Empty after Clean)")
-            mark_as_done(file_id, file_name)
+            mark_as_done(row_num, "PART1_DONE (Empty)")
             continue
 
         cleaned_content = "".join(headers) + "".join(["".join(b['lines']) for b in new_blocks])
@@ -341,21 +348,31 @@ def main():
         if len(ts_status) > 49000:
             ts_status = ts_status[:49000] + "\n... [TRUNCATED]"
         month = get_month_folder_name(file_name)
-        add_log("Unknown", month, file_name, ts_status, "No")
+        store_num = get_store_number(file_name)
+        add_log(store_num, month, file_name, ts_status, "No")
 
         # Convert
         csv_output = convert_to_final_format(cleaned_content, file_name)
         if not csv_output:
-            mark_as_done(file_id, file_name)
+            mark_as_done(row_num, "FAILED: Conversion")
             continue
 
-        # Upload
+        # --- UPDATED: UPLOAD LOGIC ---
         month_name = get_month_folder_name(file_name)
-        target_id = get_or_create_subfolder(CONVERTED_FOLDER_ID, month_name) if month_name else CONVERTED_FOLDER_ID
+        store_num = get_store_number(file_name)
+
+        # 1. Get or Create STORE Folder (e.g., "10618")
+        store_folder_id = get_or_create_subfolder(CONVERTED_FOLDER_ID, store_num)
+
+        # 2. Get or Create MONTH Folder INSIDE Store Folder (e.g., "November 2025")
+        if month_name:
+            target_id = get_or_create_subfolder(store_folder_id, month_name)
+        else:
+            target_id = store_folder_id
+
         output_name = "converted_" + file_name
 
         service = get_service()
-        # UPDATED: Added supportsAllDrives and includeItemsFromAllDrives
         existing = service.files().list(
             q=f"'{target_id}' in parents and name='{output_name}' and trashed=false",
             fields="files(id)",
@@ -364,17 +381,15 @@ def main():
         ).execute().get('files', [])
 
         if not existing:
-            # FIXED: Indentation is correct now
-            # FIXED: Added supportsAllDrives=True
             media = MediaIoBaseUpload(io.BytesIO(csv_output.encode('utf-8')), mimetype='text/csv', resumable=True)
             service.files().create(
                 body={'name': output_name, 'parents': [target_id]}, 
                 media_body=media,
                 supportsAllDrives=True
             ).execute()
-            print(f"Uploaded: {output_name}")
+            print(f"Uploaded: {output_name} to Store {store_num}/{month_name}")
 
-        mark_as_done(file_id, file_name)
+        mark_as_done(row_num, "PART1_DONE")
         processed_count += 1
 
         flush_logs_to_sheet()
