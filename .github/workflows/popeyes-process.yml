@@ -24,8 +24,3 @@ jobs:
         env:
           SERVICE_ACCOUNT_KEY: ${{ secrets.SERVICE_ACCOUNT_KEY }}
         run: python part1.py
-
-      - name: Run Payroll Processor
-        env:
-          SERVICE_ACCOUNT_KEY: ${{ secrets.SERVICE_ACCOUNT_KEY }}
-        run: python payroll.py
