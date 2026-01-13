@@ -18,7 +18,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-SALES_ROOT_FOLDER_ID = "1ge-fbJkuph-B5sGR3GThhIKRr5YKO_rS" # (Unused if driving by sheet, but kept for ref)
+SALES_ROOT_FOLDER_ID = "1ge-fbJkuph-B5sGR3GThhIKRr5YKO_rS"
 CONVERTED_FOLDER_ID = "0AMqtpoGz7H5RUk9PVA"  # Shared Drive Root Folder
 TRACKING_SHEET_ID = "1r872UNCcsgkdEkV9Y9PnNcuTtPrezs0XE3n8HFZgqyM"
 LOG_SHEET_ID = "1XhdFj-fpINNJVveiEk_Qp2FRD-4CV6a1GnUKF7RWlVk"
@@ -478,3 +478,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
